@@ -1,0 +1,414 @@
+unit UImport;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, RzSplit, RzGroupBar, RzStatus, ExtCtrls, RzPanel, Grids,
+  DBGridEh, RzButton, u_data, RzBckgnd, StdCtrls, RzLabel, XPMan, ImgList,
+  ActnList, Mask, RzEdit, RzDBEdit, ComCtrls, RzLaunch, DB, DBTables, u_tu_find,
+  RzCommon, RzForms, RzRadChk, StrUtils, frxClass, frxDBSet, frxExportXLS,
+  RzSpnEdt, u_no_check_print, DBCtrls, RzDBCmbo, u_stat_ray_print, GridsEh,
+  frxExportXML, frxExportRTF, RzRadGrp, u_progress, Ora;
+
+  type
+	 TImportThread = class(TThread)
+  public   
+	FN:string;  
+	Roll:integer;
+ 	LF:TLoadForm;   	
+	procedure Raznoska; 
+  private 
+	 procedure UpdateProgressBar; 
+  protected
+	 procedure Execute; override;
+	 procedure blabla;
+  end; 
+
+implementation
+
+uses u_main;
+
+procedure TImportThread.Execute;
+var
+ NewRoll: Integer;
+ MyLaunch: TRzLauncher;
+ StringList: TStrings;
+
+begin
+  FMain.DTPRoll.Date := Date;
+  DM.OQRoll.ParamByName('roll_date').AsDate := FMain.DTPRoll.Date;
+  DM.OQRoll.Refresh;
+//источник МТерминал
+if DM.OTAskueSrc.FieldByName('id').AsInteger=3 then
+ begin
+	DM.OSPRoll.StoredProcName := 'askue.askue_proc.get_roll_id';
+	DM.OSPRoll.Execute;
+	NewRoll := DM.OSPRoll.ParamByName('result').AsInteger;
+
+  DM.OSQLRoll.SQL.Clear;
+  DM.OSQLRoll.SQL.Add('INSERT INTO askue.roll(id, roll_date, askue_src) VALUES(:id, :roll_date, 3)');
+  DM.OSQLRoll.ParamByName('id').AsInteger := NewRoll;
+  DM.OSQLRoll.ParamByName('roll_date').AsDate := FMain.DTPRoll.Date;
+  DM.OSQLRoll.Execute;
+  DM.OQRoll.Refresh;
+  DM.OQRoll.Locate('id', NewRoll, [loCaseInsensitive]);
+
+  DM.OS.Commit;	 
+
+  FMain.RzL.FileName := DM.OTAskueSrc.FieldByName('ext_mod').AsString;
+  FMain.RzL.Launch;
+
+// ============= Реестр пустой ? =============
+  DM.OQ.SQL.Clear;
+  DM.OQ.SQL.Add('SELECT count(id) c_id FROM askue.sch_val WHERE roll = :roll');
+  DM.OQ.ParamByName('roll').AsInteger := NewRoll;
+  DM.OQ.Open;
+  if DM.OQ.FieldByName('c_id').AsInteger = 0 then 
+	begin
+	 DM.OSQL.SQL.Clear;
+	 DM.OSQL.SQL.Add('DELETE FROM askue.roll WHERE id = :roll');
+	 DM.OSQL.ParamByName('roll').AsInteger := NewRoll;
+	 DM.OSQL.Execute;
+	 DM.OS.Commit;
+	 DM.OQRoll.Refresh;
+  end;  
+ end;
+
+//источник Ридер
+if  DM.OTAskueSrc.FieldByName('id').AsInteger=1 then
+ begin
+  
+  DM.OSPRoll.StoredProcName := 'askue.askue_proc.get_roll_id';
+  DM.OSPRoll.Execute;
+  NewRoll := DM.OSPRoll.ParamByName('result').AsInteger;
+  Roll:= NewRoll;//потоку присваиваем номер текущего реестра
+  DM.OSQLRoll.SQL.Clear;
+  DM.OSQLRoll.SQL.Add('INSERT INTO askue.roll(id, roll_date, askue_src) VALUES(:id, :roll_date, :askue_src)');
+  DM.OSQLRoll.ParamByName('id').AsInteger := NewRoll;
+  DM.OSQLRoll.ParamByName('roll_date').AsDate := FMain.DTPRoll.Date;
+  DM.OSQLRoll.ParamByName('askue_src').AsInteger := DM.OTAskueSrc.FieldByName('id').AsInteger;
+  DM.OSQLRoll.Execute;
+  DM.OQRoll.Refresh;
+  //DM.OQRoll.Locate('id', NewRoll, [loCaseInsensitive]);
+
+  DM.OS.Commit;
+  StringList := TStringList.Create;
+  //создаём файл лога с именем по номеру реестра и временем  
+  FN :=  'logs\' + IntToStr(NewRoll) + '_'+ DateToStr(FMain.DTPRoll.Date) + '.txt';
+  StringList.SaveToFile(FN);
+
+  MyLaunch:=TRzLauncher.Create(Application);
+  MyLaunch.WaitType :=  wtFullStop;
+  MyLaunch.WaitUntilFinished :=true;
+  MyLaunch.FileName := DM.OTAskueSrc.FieldByName('ext_mod').AsString;
+  MyLaunch.Parameters := DM.OS.Server + ' "' +
+								 DM.OS.Username + '" "' +
+								 DM.OS.Password + '" ' +
+								 IntToStr(NewRoll) + ' ' +
+								 DM.OTAskueSrc.FieldByName('id').AsString 
+                                                      + ' ' + FN;  
+  MyLaunch.Launch;
+  Sleep(3000);
+  if FMain.ClearRoll(NewRoll) = true then Exit;
+	end;
+ //DM.OQRoll.Edit;
+ //DM.OQRoll.FieldByName('id').Value := NewRoll;
+ //Synchronize(blabla); //создаёт форму и передаёт в поток
+  Sleep(3000);
+  Self.Raznoska;
+end;
+
+procedure TImportThread.blabla;
+begin
+  FMain.Raznoska(Self);
+end;
+
+procedure TImportThread.Raznoska;
+var 
+  ResStep: Integer;
+  QueryTemp, MessLog: String;
+  RaznoskaQuery: TOraQuery;
+  OSPGetPoslPok : TOraStoredProc;
+  OSPProvPokaz : TOraStoredProc;
+  OSQLIns : TOraSQL;
+  OSQLUpd : TOraSQL;
+  OS : TOraSession;
+
+begin
+OS:= TOraSession.Create(Application);
+OS.ConnectString:='askue/askue@orcl';
+OS.Connected:=true;
+
+OSQLIns:=  TOraSQL.Create(Application);
+OSQLIns.Session:= OS;
+
+OSQLUpd:=  TOraSQL.Create(Application);
+OSQLUpd.Session:= OS;
+//-------------------------------------------------------------------------------------------
+ QueryTemp:='begin esbp.ESBP_PROC.GET_POSL_POK_SCH(:PLS, :PNSCHETCH, '
+ +':PDAT_UST, :PNPOK, :PNPOKN, :PDAT_PPOK, :PKPOK, :PCKPOK, :PKPOK_N, :PCKPOK_N, :PKZ); end;';
+ OSPGetPoslPok:=  TOraStoredProc.Create(Application);
+ OSPGetPoslPok.Session:= OS;
+ OSPGetPoslPok.StoredProcName:='esbp.ESBP_PROC.GET_POSL_POK_SCH';
+ OSPGetPoslPok.SQL.Add(QueryTemp);
+ OSPGetPoslPok.ParamByName('PLS').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PLS').ParamType:= ptInput;
+ OSPGetPoslPok.ParamByName('PNSCHETCH').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PNSCHETCH').ParamType:= ptInput;
+ OSPGetPoslPok.ParamByName('PDAT_UST').DataType:=ftDate;
+ OSPGetPoslPok.ParamByName('PDAT_UST').ParamType:= ptInput;
+ OSPGetPoslPok.ParamByName('PNPOK').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PNPOK').ParamType:= ptInput;
+ OSPGetPoslPok.ParamByName('PNPOKN').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PNPOKN').ParamType:= ptInput;
+ OSPGetPoslPok.ParamByName('PDAT_PPOK').DataType:=ftDate;
+ OSPGetPoslPok.ParamByName('PDAT_PPOK').ParamType:= ptOutput;
+ OSPGetPoslPok.ParamByName('PKPOK').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PKPOK').ParamType:= ptOutput;
+ OSPGetPoslPok.ParamByName('PCKPOK').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PCKPOK').ParamType:= ptOutput;
+ OSPGetPoslPok.ParamByName('PKPOK_N').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PKPOK_N').ParamType:= ptOutput;
+ OSPGetPoslPok.ParamByName('PCKPOK_N').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PCKPOK_N').ParamType:= ptOutput;
+ OSPGetPoslPok.ParamByName('PKZ').DataType:=ftFloat;
+ OSPGetPoslPok.ParamByName('PKZ').ParamType:= ptOutput;
+//-----------------------------------------------------------------------------------
+ QueryTemp:=
+ 'begin ' +
+  'esbp.ESBP_PROC.PROV_POKAZ(:PLS, :PNSCHETCH, :PZONN, :PZNACHN,' +
+  ':PNDAT_POK, :PNPOK, :PCNPOK, :PNPOKN, ' +
+  ':PCNPOKN, :PKDAT_POK, :PKPOK, :PKPOKN, :PCKPOK, :PCKPOKN, ' +
+  ':PSUT_POSL_INT, :PSUT_NOV_INT, :POTKLON, :PSUT_POSL_INTN, '+
+  ':PSUT_NOV_INTN, :POTKLONN, :PKZ); ' +
+ 'end; ';
+
+ OSPProvPokaz:=  TOraStoredProc.Create(Application);
+ OSPProvPokaz.Session:= OS;
+ OSPProvPokaz.StoredProcName:='esbp.ESBP_PROC.PROV_POKAZ';
+ OSPProvPokaz.SQL.Add(QueryTemp);
+ OSPProvPokaz.ParamByName('PLS').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PLS').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PNSCHETCH').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PNSCHETCH').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PZONN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PZONN').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PZNACHN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PZNACHN').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PNDAT_POK').DataType:=ftDate;
+ OSPProvPokaz.ParamByName('PNDAT_POK').ParamType:= ptinput;
+ OSPProvPokaz.ParamByName('PNPOK').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PNPOK').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PCNPOK').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PCNPOK').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PNPOKN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PNPOKN').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PCNPOKN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PCNPOKN').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PKDAT_POK').DataType:=ftDate;
+ OSPProvPokaz.ParamByName('PKDAT_POK').ParamType:= ptinput;
+ OSPProvPokaz.ParamByName('PKPOK').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PKPOK').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PKPOKN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PKPOKN').ParamType:= ptInput;
+ OSPProvPokaz.ParamByName('PCKPOK').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PCKPOK').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PCKPOKN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PCKPOKN').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PSUT_POSL_INT').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PSUT_POSL_INT').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PSUT_NOV_INT').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PSUT_NOV_INT').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('POTKLON').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('POTKLON').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('POTKLONN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('POTKLONN').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PSUT_POSL_INTN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PSUT_POSL_INTN').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PSUT_NOV_INTN').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PSUT_NOV_INTN').ParamType:= ptOutput;
+ OSPProvPokaz.ParamByName('PKZ').DataType:=ftFloat;
+ OSPProvPokaz.ParamByName('PKZ').ParamType:= ptOutput;
+
+ RaznoskaQuery:= TOraQuery.Create(Application);
+ RaznoskaQuery.Session:= OS;
+ RaznoskaQuery.FetchAll:= true;
+ RaznoskaQuery.Close;
+
+ QueryTemp:= 'SELECT sv.id, '+
+		 'ts.NAME, '+
+		 'sv.ser_num, '+
+		 'sv.val_date, '+
+		 'sv.SCH_VAL1, '+
+		 'sv.SCH_VAL2, '+
+		 'sv.SCH_VAL3, '+
+		 'sv.SCH_STAT_EXT,'+
+		 ' askue.askue_proc.get_sch_num(ste.sch_type, sv.ser_num, sv.val_date) sch_num,'+
+		 ' askue.askue_proc.get_sch_ls(ste.sch_type, sv.ser_num, sv.val_date) sch_ls,'+
+		 ' askue.askue_proc.get_sch_addr(ste.sch_type, sv.ser_num, sv.val_date) sch_addr,'+
+		 ' sv.add_val_step,'+
+		 ' sv.add_val_log,'+
+		 ' (SELECT ts.zonn_sch FROM esbp.type_sch ts WHERE ts.type_sch = ste.SCH_TYPE) sch_zon,'+
+		 ' ste.SCH_TYPE,'+
+		 ' sv.val_num,'+
+		 ' sv.askue_src,'+
+		 ' sv.inter_type,'+
+		 ' askue.askue_proc.get_sch_date(ste.sch_type, sv.ser_num, sv.val_date) sch_date,'
+		 +' askue.askue_proc.get_sch_npok(ste.sch_type, sv.ser_num, sv.val_date) sch_npok,'
+		 +' askue.askue_proc.get_sch_npokn(ste.sch_type, sv.ser_num, sv.val_date) sch_npokn'
+	  
++' FROM askue.sch_val sv,'+
+	  ' askue.sch_type_ext ste,'+
+	  ' esbp.type_sch ts'+
+' WHERE sv.askue_src = ste.askue_src AND sv.inter_type = ste.inter_type'+
+  ' AND sv.roll = :id'+
+  ' AND ste.SCH_TYPE = ts.TYPE_SCH'+
+' ORDER BY sv.ser_num, sv.val_date';     
+ 
+ RaznoskaQuery.SQL.Text:= QueryTemp;
+ RaznoskaQuery.ParamByName('id').AsInteger:= Self.Roll; 
+ RaznoskaQuery.Open; 
+ //--------------------------------------------------------
+ //FMain.RzCheckBox7.Checked := false;
+ //FMain.RzCheckBox1.Checked := true;
+ //FMain.RzCheckBox8.Checked := true;
+ RaznoskaQuery.Filtered:=false;
+ RaznoskaQuery.Filter:='(sch_ls <> -1) and (val_num = 1)';
+ RaznoskaQuery.Filtered:=true;
+ //FMain.SetListFilter(RaznoskaQuery);//применяем фильтры
+ //---------------------------------------------------------
+ //self.LF.pb.TotalParts:= RaznoskaQuery.RecordCount;
+ RaznoskaQuery.First;
+  while not RaznoskaQuery.Eof do begin
+	 ResStep := 0; MessLog := '';
+	 if (RaznoskaQuery.FieldByName('sch_num').AsInteger > 0) and
+		 (RaznoskaQuery.FieldByName('add_val_step').AsInteger = 0) and
+		 (RaznoskaQuery.FieldByName('add_val_step').AsInteger = 0) then begin
+		// ==== Счетчик найден и показания не разнесены ====
+		OSPGetPoslPok.ParamByName('PLS').Value := RaznoskaQuery.FieldByName('sch_ls').AsInteger;
+		OSPGetPoslPok.ParamByName('PNSCHETCH').Value := RaznoskaQuery.FieldByName('sch_num').AsInteger;
+		OSPGetPoslPok.ParamByName('PDAT_UST').Value := RaznoskaQuery.FieldByName('sch_date').AsDateTime;
+		OSPGetPoslPok.ParamByName('PNPOK').Value := RaznoskaQuery.FieldByName('sch_npok').AsFloat;
+		OSPGetPoslPok.ParamByName('PNPOKN').Value := RaznoskaQuery.FieldByName('sch_npokn').AsFloat;
+		OSPGetPoslPok.Execute;
+      ResStep := 1;
+		if OSPGetPoslPok.ParamByName('PKZ').AsInteger > 0 then begin
+		  case OSPGetPoslPok.ParamByName('PKZ').AsInteger of
+			 1: MessLog := MessLog + 'Способ учета не установлен; ';
+			 2: MessLog := MessLog + 'Способ учета не по счетчику; ';
+			 3: MessLog := MessLog + 'Не установлен счетчик; ';
+		  else
+			 MessLog := MessLog + 'Ошибка предыдущих показаний; ';
+		  end;
+		end else begin
+		  if OSPGetPoslPok.ParamByName('pdat_ppok').AsDateTime >=
+			  RaznoskaQuery.FieldByName('val_date').AsDateTime then begin
+			 MessLog := MessLog + 'Показания не актуальны; ';
+		  end else begin
+			 OSPProvPokaz.ParamByName('PLS').Value := RaznoskaQuery.FieldByName('sch_ls').AsInteger;
+			 OSPProvPokaz.ParamByName('PNSCHETCH').Value := RaznoskaQuery.FieldByName('sch_num').AsInteger;
+			 OSPProvPokaz.ParamByName('PZONN').Value := RaznoskaQuery.FieldByName('sch_zon').AsInteger;
+//          DM.OSPProvPokaz.ParamByName('PZNACHN').Value := 0;  // Ищет значность в справочнике
+			 if OSPGetPoslPok.ParamByName('pdat_ppok').Value = RaznoskaQuery.FieldByName('sch_date').AsDateTime then
+				OSPProvPokaz.ParamByName('PNDAT_POK').Value := OSPGetPoslPok.ParamByName('pdat_ppok').AsDateTime
+			 else
+				OSPProvPokaz.ParamByName('PNDAT_POK').Value := OSPGetPoslPok.ParamByName('pdat_ppok').AsDateTime + 1;
+			 OSPProvPokaz.ParamByName('PNPOK').Value := OSPGetPoslPok.ParamByName('PKPOK').Value;
+			 OSPProvPokaz.ParamByName('PCNPOK').Value := OSPGetPoslPok.ParamByName('PCKPOK').Value;
+			 OSPProvPokaz.ParamByName('PNPOKN').Value := OSPGetPoslPok.ParamByName('PKPOK_N').Value;
+			 OSPProvPokaz.ParamByName('PCNPOKN').Value := OSPGetPoslPok.ParamByName('PCKPOK_N').Value;
+			 OSPProvPokaz.ParamByName('PKDAT_POK').Value := RaznoskaQuery.FieldByName('val_date').AsDateTime;
+			 OSPProvPokaz.ParamByName('PKPOK').Value := RaznoskaQuery.FieldByName('sch_val1').AsFloat;
+			 OSPProvPokaz.ParamByName('PKPOKN').Value := RaznoskaQuery.FieldByName('sch_val2').AsFloat;
+			 OSPProvPokaz.Execute;
+          ResStep := 2;
+			 if (OSPProvPokaz.ParamByName('PKZ').AsInteger > 1) then begin
+            case OSPProvPokaz.ParamByName('PKZ').AsInteger of
+				  3: MessLog := MessLog + 'Расход на интервале отрицательный; ';
+              4: MessLog := MessLog + 'Показания превышают значность; ';
+				  8: MessLog := MessLog + 'Начальные показания меньше 2000 года; ';
+            else
+              MessLog := MessLog + 'Ошибка проверки показаний; ';
+				end;
+			 end else begin
+//+++++++++++++++++++++++++ Все нормально добавим показание ++++++++++++++++++++++++
+				OSQLIns.SQL.Clear;
+				OSQLIns.SQL.Add('INSERT INTO esbp.POKAZ(LS, NSCHETCH, DND, DKD, IST_POK, NPOK, CNPOK, KPOK, CKPOK, NPOK_N, CNPOK_N, KPOK_N, CKPOK_N, STAT)');
+				OSQLIns.SQL.Add('VALUES(:ls, :nschetch, :dnd, :dkd, :ist_pok, :npok, :cnpok, :kpok, :ckpok, :npok_n, :cnpok_n, :kpok_n, :ckpok_n, :stat_n)');
+				OSQLIns.ParamByName('ls').Value := RaznoskaQuery.FieldByName('sch_ls').AsInteger;
+				OSQLIns.ParamByName('nschetch').Value := RaznoskaQuery.FieldByName('sch_num').AsInteger;
+            if OSPGetPoslPok.ParamByName('pdat_ppok').Value = RaznoskaQuery.FieldByName('sch_date').AsDateTime then
+				  OSQLIns.ParamByName('dnd').Value := OSPGetPoslPok.ParamByName('pdat_ppok').Value
+            else
+				  OSQLIns.ParamByName('dnd').Value := OSPGetPoslPok.ParamByName('pdat_ppok').Value + 1;
+				OSQLIns.ParamByName('dkd').Value := RaznoskaQuery.FieldByName('val_date').AsDateTime;
+				OSQLIns.ParamByName('ist_pok').Value := 6;  // АСКУЭ
+				OSQLIns.ParamByName('npok').Value := OSPGetPoslPok.ParamByName('PKPOK').AsFloat;
+				OSQLIns.ParamByName('cnpok').Value := OSPGetPoslPok.ParamByName('PCKPOK').AsInteger;
+				OSQLIns.ParamByName('kpok').Value := RaznoskaQuery.FieldByName('sch_val1').AsFloat;
+				OSQLIns.ParamByName('ckpok').Value := OSPProvPokaz.ParamByName('PCKPOK').AsInteger;
+				OSQLIns.ParamByName('npok_n').Value := OSPGetPoslPok.ParamByName('PKPOK_N').AsFloat;
+				OSQLIns.ParamByName('cnpok_n').Value := OSPGetPoslPok.ParamByName('PCKPOK_N').AsInteger;
+				OSQLIns.ParamByName('kpok_n').Value := RaznoskaQuery.FieldByName('sch_val2').AsFloat;
+				OSQLIns.ParamByName('ckpok_n').Value := OSPProvPokaz.ParamByName('PCKPOKN').AsInteger;
+
+				OSQLIns.ParamByName('stat_n').Value := RaznoskaQuery.FieldByName('SCH_STAT_EXT').AsString;
+            try
+				  ResStep := 3;
+				  OSQLIns.Execute; 				 
+				except
+              on E: Exception do
+					 begin
+					  //	ShowMessage('');
+						if Pos('Показ. счетч. перекрывают интервал отключ. абонента', E.Message) <> 0 then
+						begin
+						  ResStep := 2;
+						  MessLog := MessLog + 'Показ. счетч. перекрывают интервал отключ. абонента; ';
+						  
+						end;
+					 end;
+				end;
+			 end;  // Ввод показаний
+		  end;  // Актуальность показаний
+		end;  // Получение предыдущих показаний
+	  OSQLUpd.SQL.Clear;
+	  OSQLUpd.SQL.Add('UPDATE askue.sch_val SET add_val_step = :add_val_step, add_val_log = :add_val_log WHERE id = :id');
+	  OSQLUpd.ParamByName('add_val_step').AsInteger := ResStep;
+	  OSQLUpd.ParamByName('add_val_log').AsString := Trim(MessLog);
+	  OSQLUpd.ParamByName('id').AsInteger := RaznoskaQuery.FieldByName('id').AsInteger;
+	  OSQLUpd.Execute;
+	 end;  // Найден-ли счетчик
+
+	 RaznoskaQuery.Next;
+	 //Synchronize(UpdateProgressBar);
+  end;  //конец цикла While
+  //ShowMessage('после разноски '+ IntToStr(RaznoskaQuery.RecordCount));
+  
+  //OS.Commit;
+
+  //FMain.RzCheckBox6.Checked := true;
+  //FMain.RzCheckBox7.Checked := false;
+  //FMain.RzCheckBox1.Checked := false;
+  //FMain.RzCheckBox8.Checked := false;
+  //FMain.SetListFilter(RaznoskaQuery);
+  RaznoskaQuery.Refresh;
+  RaznoskaQuery.Filtered:=false;
+  RaznoskaQuery.Filter:='(add_val_step = 3)';
+  RaznoskaQuery.Filtered:=true;
+
+  //ShowMessage('после фильтра '+ IntToStr(RaznoskaQuery.RecordCount));
+  //FMain.ShowRecordCount(RaznoskaQuery.RecordCount);
+  OS.Commit;
+	 
+  //LF.Hide;
+  //LF.Free;
+end;
+
+procedure TImportThread.UpdateProgressBar;
+begin
+ //self.LF.pb.IncPartsByOne;
+end; 
+
+end.
+ 

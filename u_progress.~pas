@@ -1,0 +1,41 @@
+unit u_progress;
+
+interface
+
+uses
+  Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
+  Dialogs, RzPrgres;
+
+type
+  TLoadForm = class(TForm)
+    pb: TRzProgressBar;
+    procedure FormShow(Sender: TObject);
+  private
+	 { Private declarations }
+  public
+	 { Public declarations }
+	FN:string;
+  end;
+
+var
+  LoadForm: TLoadForm;
+ 
+implementation
+
+uses u_main, UImport, u_data;
+
+{$R *.dfm}
+
+procedure TLoadForm.FormShow(Sender: TObject);
+var
+ StringList: TStrings;
+
+begin
+ StringList:= TStringList.Create();
+ StringList.LoadFromFile(FN);
+ LoadForm.Caption:= LoadForm.Caption + ' ' + Copy(StringList.Strings[0],0,10);
+end;
+
+end.
+
+
